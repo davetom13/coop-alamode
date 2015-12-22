@@ -40,7 +40,7 @@ In order to facilitate higher level control, this device is an I2C slave at addr
 
 ## Hardware needed
 * Alamode for Raspberry Pi - for running this firmware.  I purchased mine from Makershed.
- * Raspberry Pi - for higher level control.  This isn't strictly necessary as this firmware is freestanding and can run by itself.  However, you'd be better off with a Uno or similar hardware rather than the Alamode if not planning on using a Pi.
+* Raspberry Pi - for higher level control.  This isn't strictly necessary as this firmware is freestanding and can run by itself.  However, you'd be better off with a Uno or similar hardware rather than the Alamode if not planning on using a Pi.
 * DC motor - to raise and lower the door.  I'm using a small servo motor (rated 24V 5 amp) with no encoder.
 * L298N module - to control the DC motor.  I'm using a module purchased from eBay.
 * 1 or more channel AC relay module - to turn the light on and off.  I'm using a 4 channel relay purchased from Amazon.  Make sure the relay board is rated for the voltage you are planning to use.  Some relay modules are only rated for 24VAC and could be dangerous if used at 120VAC or higher.  You don't need a relay module as you could just wire in relays directly, but as inexpensive as these things are, they are worth it to simplify the mounting and wiring.
