@@ -4,57 +4,56 @@
 
 // PWM pin for controlling motor speed, output, must be one of the valid PWM pins
 // Connected to ENA and ENB on L298N module
-const int PWM_PIN = 11;
+const int DOOR_PWM_PIN = 11;
 
 // Pins connected to IN1-IN4 on L298N module
 // To parallel, IN1 and IN4 should be tied together and IN2 and IN3
 // For more info see Figure 7 in the datasheet
 // If this setup causes the door to move the wrong way, swap the pin numbers here, the motor leads, or the pin connections
-const int OPENING_PIN = 10;
-const int CLOSING_PIN = 12;
+const int DOOR_OPENING_PIN = 10;
+const int DOOR_CLOSING_PIN = 12;
 
 // Pins connected to limit switches for full open and full close.
 // Switches should be normally open with the switch input wired to ground.
 // Pullups should be enabled on these pins.
-const int OPEN_LIMIT_PIN = 2;
-const int CLOSE_LIMIT_PIN = 3;
+const int DOOR_OPEN_LIMIT_PIN = 2;
+const int DOOR_CLOSE_LIMIT_PIN = 3;
 
 // Interrupt numbers for the open and close interrupts
-const int OPENED_INTERRUPT = 0;
-const int CLOSED_INTERRUPT = 1;
+const int DOOR_OPENED_INTERRUPT = 0;
+const int DOOR_CLOSED_INTERRUPT = 1;
 
 // Interrupt register bits for the open and close interrupts
 // These are used to clear any pending interrupts before re-attaching
-const int OPEN_INTERRUPT_REGISTER_BIT = bit (INTF0);
-const int CLOSE_INTERRUPT_REGISTER_BIT = bit (INTF1);
+const int DOOR_OPEN_INTERRUPT_REGISTER_BIT = bit (INTF0);
+const int DOOR_CLOSE_INTERRUPT_REGISTER_BIT = bit (INTF1);
 
 // Software configuration
 
-// Maximum PWM setting.  Valid values are 0 (off) to 255 (full on)
-const int MAX_PWM = 255;
-
-const int MAX_DOOR_SPEED = 0x3FFF;
+// Maximum door speed. Valid values are 0 (off) to 255 (full on)
+const int DOOR_MAX_SPEED_CLOSE = 255;
+const int DOOR_MAX_SPEED_OPEN = 255;
 
 // Door low speed when approaching an end stop.
-// Valid values are 0 (off) to MAX_DOOR_SPEED (full on)
-const int DOOR_LOW_SPEED_CLOSE = 60 << 6;
-const int DOOR_LOW_SPEED_OPEN = 95 << 6;
-
-
-// This value controls the slope of the soft start / stop
-const int DOOR_SPEED_RAMP = 32; // amount to change speed per cycle
+// Valid values are 0 (off) to 255 (full on)
+const int DOOR_LOW_SPEED_CLOSE = 190;
+const int DOOR_LOW_SPEED_OPEN = 140;
 
 // Initial speed for the motor when reversing. If negative, motor will not be started until the ramp up has
 // brought the value above 0.
-const int INITIAL_REVERSING_MOTOR_SPEED = -4096 / DOOR_SPEED_RAMP;
+const int DOOR_INITIAL_REVERSING_SPEED = -128;
 
-// Arbitrary value defining when to shut down the motor if it has been on for this many update cycles.
-const unsigned int DOOR_MOTOR_WATCHDOG_CLOSE_MAX = 2600;
-const unsigned int DOOR_MOTOR_WATCHDOG_OPEN_MAX = 2700;
+// Values defining when to shut down the motor, in millis since the motion was initiated.
+// Generally set to a few seconds longer than normal operating time to avoid false triggers
+// but still provide protection in case an end stop does not trigger.
+const unsigned long DOOR_WATCHDOG_CLOSE = 15000;
+const unsigned long DOOR_WATCHDOG_OPEN = 15000;
 
-// Arbitrary value defining when to slow motor down 
-const unsigned int DOOR_MOTOR_WATCHDOG_CLOSE_LOW_SPEED = 1700;
-const unsigned int DOOR_MOTOR_WATCHDOG_OPEN_LOW_SPEED = 1900;
+// Values defining when to slow motor down, in millis since the motion was initiated
+// Generally set to a second or two before normal operating time to slow the door down before
+// it hits the end stop.  Set to watchdog to disable.
+const unsigned long DOOR_LOW_SPEED_CUTOVER_CLOSE = 9500;
+const unsigned long DOOR_LOW_SPEED_CUTOVER_OPEN = 9000;
 
 // Globals
 
@@ -66,46 +65,45 @@ volatile byte doorState = DOOR_STATE_UNKNOWN;
 // and atomicity
 volatile byte doorCommand = DOOR_COMMAND_NONE;
 
-// Door speed tracker. Negative values indicates no motor output and are used for a motor start delay.
-// Note this is not directly used as a PWM value but rather the PWM is derived from this.
+// Door speed tracker. Negative values indicate no motor output and are used for a motor start delay.
 int doorSpeed = 0;
 
-// Door watchdog counter.
-unsigned int doorWatchdog = 0;
-
-// Max allowed for for door watchdog, variable as it can differ between opening and closing
-unsigned int doorWatchdogMax;
-
-// door watchdog value at which it transitions to low speed, variable as it can differ between opening and closing
-unsigned int doorWatchdogLowSpeedCutover;
+// Requested speed of door
+int doorRequestedSpeed = 0;
 
 // door speed setting for low speed, variable as it can differ between opening and closing
 int doorLowSpeed;
+
+// Time in millis when door motion was initiated.
+unsigned long doorStartTime;
+
+// Max allowed for door run time watchdog, variable as it can differ between opening and closing
+unsigned long doorWatchdog;
+
+// door run time value at which it transitions to low speed, variable as it can differ between opening and closing
+unsigned long doorLowSpeedCutover;
 
 
 /**
  * Sets up the pins / interrupts to control / monitor the door
  */
 void setupDoor() {
-  pinMode(PWM_PIN, OUTPUT);  
-  digitalWrite(PWM_PIN, LOW);
+  pinMode(DOOR_PWM_PIN, OUTPUT);  
+  digitalWrite(DOOR_PWM_PIN, LOW);
   
-  pinMode(OPENING_PIN, OUTPUT);
-  digitalWrite(OPENING_PIN, LOW);
+  pinMode(DOOR_OPENING_PIN, OUTPUT);
+  digitalWrite(DOOR_OPENING_PIN, LOW);
   
-  pinMode(CLOSING_PIN, OUTPUT);
-  digitalWrite(CLOSING_PIN, LOW);
+  pinMode(DOOR_CLOSING_PIN, OUTPUT);
+  digitalWrite(DOOR_CLOSING_PIN, LOW);
   
-  pinMode(OPEN_LIMIT_PIN, INPUT_PULLUP);
-//  attachInterrupt(OPENED_INTERRUPT, processDoorOpenLimit, FALLING);
-  
-  pinMode(CLOSE_LIMIT_PIN, INPUT_PULLUP);
-//  attachInterrupt(CLOSED_INTERRUPT, processDoorCloseLimit, FALLING);
+  pinMode(DOOR_OPEN_LIMIT_PIN, INPUT_PULLUP);
+  pinMode(DOOR_CLOSE_LIMIT_PIN, INPUT_PULLUP);
 
-  if (digitalRead(OPEN_LIMIT_PIN) == LOW) {
+  if (digitalRead(DOOR_OPEN_LIMIT_PIN) == LOW) {
     doorState = DOOR_STATE_OPEN;
   }
-  else if (digitalRead(CLOSE_LIMIT_PIN) == LOW) {
+  else if (digitalRead(DOOR_CLOSE_LIMIT_PIN) == LOW) {
     doorState = DOOR_STATE_CLOSE;
   }
 }
@@ -166,9 +164,9 @@ void processDoorCommand() {
     doorCommand = DOOR_COMMAND_NONE;
   }
 
-
   interrupts();
 }
+
 
 /**
  * Process the command to open the door.
@@ -178,26 +176,28 @@ void processDoorOpenCommand() {
   if ((doorState == DOOR_STATE_OPEN) || (doorState == DOOR_STATE_OPENING)) {
     return;
   }
-  
-  digitalWrite(PWM_PIN, LOW);
-  digitalWrite(OPENING_PIN, HIGH);
-  digitalWrite(CLOSING_PIN, LOW);
 
-  EIFR = OPEN_INTERRUPT_REGISTER_BIT;
-  attachInterrupt(OPENED_INTERRUPT, processDoorOpenLimit, FALLING);
+  digitalWrite(DOOR_PWM_PIN, LOW);
+  digitalWrite(DOOR_OPENING_PIN, HIGH);
+  digitalWrite(DOOR_CLOSING_PIN, LOW);
+
+  // Clears any pending interrupts that may have occurred after interrupt was previously detached
+  EIFR = DOOR_OPEN_INTERRUPT_REGISTER_BIT;
+  attachInterrupt(DOOR_OPENED_INTERRUPT, processDoorOpenLimit, FALLING);
 
   // Check for motor reversal
   if (doorState == DOOR_STATE_CLOSING) {
-    doorSpeed = INITIAL_REVERSING_MOTOR_SPEED;
-    detachInterrupt(CLOSED_INTERRUPT);
+    doorSpeed = DOOR_INITIAL_REVERSING_SPEED;
+    detachInterrupt(DOOR_CLOSED_INTERRUPT);
   }
   else {
     doorSpeed = 0;
   }
 
-  doorWatchdog = 0;
-  doorWatchdogMax = DOOR_MOTOR_WATCHDOG_OPEN_MAX;
-  doorWatchdogLowSpeedCutover = DOOR_MOTOR_WATCHDOG_OPEN_LOW_SPEED;
+  doorStartTime = millis();
+  doorRequestedSpeed = DOOR_MAX_SPEED_OPEN;
+  doorWatchdog = DOOR_WATCHDOG_OPEN;
+  doorLowSpeedCutover = DOOR_LOW_SPEED_CUTOVER_OPEN;
   doorLowSpeed = DOOR_LOW_SPEED_OPEN;
   doorState = DOOR_STATE_OPENING;
 }
@@ -212,41 +212,42 @@ void processDoorCloseCommand() {
     return;
   }
 
-  digitalWrite(PWM_PIN, LOW);
-  digitalWrite(OPENING_PIN, LOW);
-  digitalWrite(CLOSING_PIN, HIGH);
+  digitalWrite(DOOR_PWM_PIN, LOW);
+  digitalWrite(DOOR_OPENING_PIN, LOW);
+  digitalWrite(DOOR_CLOSING_PIN, HIGH);
 
-  EIFR = CLOSE_INTERRUPT_REGISTER_BIT;
-  attachInterrupt(CLOSED_INTERRUPT, processDoorCloseLimit, FALLING);
+  // Clears any pending interrupts that may have occurred after interrupt was previously detached
+  EIFR = DOOR_CLOSE_INTERRUPT_REGISTER_BIT;
+  attachInterrupt(DOOR_CLOSED_INTERRUPT, processDoorCloseLimit, FALLING);
   
   // Check for motor reversal
   if (doorState == DOOR_STATE_OPENING) {
-    doorSpeed = INITIAL_REVERSING_MOTOR_SPEED;
-    detachInterrupt(OPENED_INTERRUPT);
+    doorSpeed = DOOR_INITIAL_REVERSING_SPEED;
+    detachInterrupt(DOOR_OPENED_INTERRUPT);
   }
   else {
     doorSpeed = 0;
   }
 
-  doorWatchdog = 0;
-  doorWatchdogMax = DOOR_MOTOR_WATCHDOG_CLOSE_MAX;
-  doorWatchdogLowSpeedCutover = DOOR_MOTOR_WATCHDOG_CLOSE_LOW_SPEED;
+  doorStartTime = millis();
+  doorRequestedSpeed = DOOR_MAX_SPEED_CLOSE;
+  doorWatchdog = DOOR_WATCHDOG_CLOSE;
+  doorLowSpeedCutover = DOOR_LOW_SPEED_CUTOVER_CLOSE;
   doorLowSpeed = DOOR_LOW_SPEED_CLOSE;
   doorState = DOOR_STATE_CLOSING;
 }
 
 
 /**
- * Updates the speed of the motor.  The PWM field will be incremented by DOOR_SPEED_RAMP
- * each time this method is called until the MAX_PWM is reached.  If the door is no longer opening
- * or closing, no speed change will occur. If the speed is negative, no speed change will occur.
+ * Updates the speed of the motor.  If the speed is not at the requested value, it will be ramped up or
+ * down as necessary each time this method is called until the requested door speed is reached.  If the door
+ * is no longer opening or closing, no speed change will occur. If the speed is negative, no speed change will occur.
  * 
  * In order to not bang into the limit switches, after a pre-determined amount of time, the motor
  * speed will be ramped down to a low speed value appropriate for the door direction.
  * 
- * Finally, this method increments and checks a watchdog counter in case the limit switches
- * are never tripped.  If the motor runs for too long, it is stopped and the door state becomes
- * unknown.
+ * Finally, this method implements a watchdog in case the limit switches are never tripped. If this happens
+ * (motor runs for too long with limit switch not being triggered) it is stopped and the door state becomes unknown.
  */
 void updateDoorMotorSpeed() {
   noInterrupts();
@@ -255,50 +256,46 @@ void updateDoorMotorSpeed() {
     return;
   }
 
-  int pwm;
+  unsigned long currentRunTime = millis() - doorStartTime;
   
-  doorWatchdog++;
-  if (doorWatchdog > doorWatchdogMax) {
-    digitalWrite(PWM_PIN, LOW);
-    digitalWrite(OPENING_PIN, LOW);
-    digitalWrite(CLOSING_PIN, LOW);
-    doorSpeed = 0;
+  if (currentRunTime >= doorWatchdog) {
+    digitalWrite(DOOR_PWM_PIN, LOW);
+    digitalWrite(DOOR_OPENING_PIN, LOW);
+    digitalWrite(DOOR_CLOSING_PIN, LOW);
+    if (doorState == DOOR_STATE_OPENING) {
+      detachInterrupt(DOOR_OPENED_INTERRUPT);
+    }
+    else {
+      detachInterrupt(DOOR_CLOSED_INTERRUPT);
+    }
     doorState = DOOR_STATE_UNKNOWN;
     interrupts();
     return;
   }
   
-  if (doorWatchdog >= doorWatchdogLowSpeedCutover) {
-    if (doorSpeed > doorLowSpeed) {
-      doorSpeed -= DOOR_SPEED_RAMP;
-      if (doorSpeed < doorLowSpeed) {
-        doorSpeed = doorLowSpeed;
-      }
-      pwm = (doorSpeed >> 6) & 0xFF;
-      analogWrite(PWM_PIN, pwm);
-    }
+  if ((currentRunTime >= doorLowSpeedCutover) && (doorRequestedSpeed != doorLowSpeed)) {
+    doorRequestedSpeed = doorLowSpeed;
+  }
+
+  if (doorSpeed == doorRequestedSpeed) {
     interrupts();
     return;
   }
 
-  if (doorSpeed >= MAX_DOOR_SPEED) {
-    interrupts();
-    return;
+  if (doorSpeed < doorRequestedSpeed) {
+    doorSpeed++;
+  }
+  else
+  {
+    doorSpeed--;
   }
 
-  doorSpeed += DOOR_SPEED_RAMP;
-  if (doorSpeed >= MAX_DOOR_SPEED) {
-    doorSpeed = MAX_DOOR_SPEED;
-  }
-
-  pwm = (doorSpeed >> 6) & 0xFF;
-  
   if (doorSpeed > 0) {
-    analogWrite(PWM_PIN, pwm);
+    analogWrite(DOOR_PWM_PIN, doorSpeed);
   }
   else {
     // Ensure motor is not turned on
-    digitalWrite(PWM_PIN, LOW);
+    digitalWrite(DOOR_PWM_PIN, LOW);
   }
 
   interrupts();
@@ -310,11 +307,11 @@ void updateDoorMotorSpeed() {
  * Puts the L298N into free run stop mode and updates the door state.
  */
 void processDoorOpenLimit() {
-  digitalWrite(PWM_PIN, LOW);
-  digitalWrite(OPENING_PIN, LOW);
-  digitalWrite(CLOSING_PIN, LOW);
+  digitalWrite(DOOR_PWM_PIN, LOW);
+  digitalWrite(DOOR_OPENING_PIN, LOW);
+  digitalWrite(DOOR_CLOSING_PIN, LOW);
   doorState = DOOR_STATE_OPEN;
-  detachInterrupt(OPENED_INTERRUPT);
+  detachInterrupt(DOOR_OPENED_INTERRUPT);
 }
 
 
@@ -323,10 +320,10 @@ void processDoorOpenLimit() {
  * Puts the L298N into free run stop mode and updates the door state.
  */
 void processDoorCloseLimit() {
-  digitalWrite(PWM_PIN, LOW);
-  digitalWrite(OPENING_PIN, LOW);
-  digitalWrite(CLOSING_PIN, LOW);
+  digitalWrite(DOOR_PWM_PIN, LOW);
+  digitalWrite(DOOR_OPENING_PIN, LOW);
+  digitalWrite(DOOR_CLOSING_PIN, LOW);
   doorState = DOOR_STATE_CLOSE;
-  detachInterrupt(CLOSED_INTERRUPT);
+  detachInterrupt(DOOR_CLOSED_INTERRUPT);
 }
 

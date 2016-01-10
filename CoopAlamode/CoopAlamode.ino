@@ -78,7 +78,7 @@ void updateHeartbeat() {
 /**
  * Updates the variables associated with tracking the uptime.  Since millis() will overflow
  * every roughly 50 days, we add an extra byte which is incremented on every overflow.  This
- * stretches the overflow to onece every approximately 35 years.
+ * stretches the overflow to once every approximately 35 years.
  */
 void updateUptime() {
   unsigned long currentTime = millis();
