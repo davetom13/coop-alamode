@@ -9,12 +9,11 @@ const int LIGHT_PIN = 8;
 
 // Globals
 
-// Current light state, should always be referenced/set with interrupts disabled to ensure consistency
-// and atomicity
-volatile byte lightState = LIGHT_STATE_OFF;
+// Current light state
+byte lightState = LIGHT_STATE_OFF;
 
-// Current command, should always be referenced/set with interrupts disabled to ensure consistency
-// and atomicity
+// Current command, may be modified by interrupt handler so if doing a read / write cycle then make sure interrupts
+// are disabled to ensure consistency and atomicity
 volatile byte lightCommand = LIGHT_COMMAND_NONE;
 
 /**
@@ -65,20 +64,16 @@ byte getLightState() {
 
 void processLightCommand() {
   noInterrupts();
+  byte currentLightCommand = lightCommand;
+  lightCommand = LIGHT_COMMAND_NONE;
+  interrupts();
 
-  if (lightCommand == LIGHT_COMMAND_ON) {
-    lightCommand = LIGHT_COMMAND_NONE;
+  if (currentLightCommand == LIGHT_COMMAND_ON) {
     processLightOnCommand();
   }
-  else if (lightCommand == LIGHT_COMMAND_OFF) {
-    lightCommand = LIGHT_COMMAND_NONE;
+  else if (currentLightCommand == LIGHT_COMMAND_OFF) {
     processLightOffCommand();
   }
-  else {
-    lightCommand = LIGHT_COMMAND_NONE;
-  }
-
-  interrupts();
 }
 
 

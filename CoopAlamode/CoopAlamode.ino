@@ -5,15 +5,17 @@
 // Arbitrary I2C address for this device
 const int I2C_ADDRESS = 0x10;
 
-const int I2C_COMMAND_DOOR_MASK = 0x10;
-const int I2C_COMMAND_LIGHT_MASK = 0x20;
-const int I2C_COMMAND_MASK = 0x0F;
+// I2C command bytes
+const byte I2C_COMMAND_DOOR = 0x01;
+const byte I2C_COMMAND_LIGHT = 0x02;
+const byte I2C_COMMAND_PAN = 0x03;
+const byte I2C_COMMAND_TILT = 0x04;
 
 // Pins connected to buttons to open and close the door
 // Switches should be momentary normally open with the switch input wired to ground.
 // Pullups should be enabled on these pins.
-const int OPEN_BUTTON_PIN = A0;
-const int CLOSE_BUTTON_PIN = A1;
+const int DOOR_OPEN_BUTTON_PIN = A0;
+const int DOOR_CLOSE_BUTTON_PIN = A1;
 
 // Pins connected to switches to open and close the door
 // Switches should be momentary normally open with the switch input wired to ground.
@@ -21,24 +23,36 @@ const int CLOSE_BUTTON_PIN = A1;
 const int LIGHT_ON_BUTTON_PIN = A2;
 const int LIGHT_OFF_BUTTON_PIN = A3;
 
+// Minimum amount of time between button polling intervals, in microseconds
+const unsigned long BUTTON_POLL_INTERVAL = 1000;
+
+// This multiplied by the button poll interval above give the minimum response time
+const byte BUTTON_DEBOUNCE = 20;
+
 // Pin to output a heartbeat signal, on Arduino, 13 is usually connected to an LED.
 const int HEARTBEAT_PIN = LED_BUILTIN;
 
-// Arbitrary number of polling cycles to change the heartbeat output
-//  This makes it toggle roughly 4 times a second.
-const int HEARTBEAT_COUNTER_RESET = 50;
+// Amount of time between toggling the hearbeat
+const unsigned long HEARTBEAT_MILLIS = 250;
 
-int heartbeatCounter = 0;
+unsigned long lastHeartbeat = 0;
 
 byte millisHighByte = 0;
 boolean millisHigh = false;
 
+byte doorOpenButtonDebounceCounter;
+byte doorCloseButtonDebounceCounter;
+byte lightOnButtonDebounceCounter;
+byte lightOffButtonDebounceCounter;
+unsigned long buttonPollTime;
+
 void setup() {
   setupDoor();
   setupLight();
+  setupPanTilt();
 
-  pinMode(OPEN_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(CLOSE_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(DOOR_OPEN_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(DOOR_CLOSE_BUTTON_PIN, INPUT_PULLUP);
   pinMode(LIGHT_ON_BUTTON_PIN, INPUT_PULLUP);
   pinMode(LIGHT_OFF_BUTTON_PIN, INPUT_PULLUP);
 
@@ -52,12 +66,17 @@ void setup() {
 
 void loop() {
   updateDoor();
+  pollDoorLimitSwitches();
   updateLight();
-  pollDoorButtons();
-  pollLightButtons();
+  pollDoorLimitSwitches();
+  updatePanTilt();
+  pollDoorLimitSwitches();
+  pollButtons();
+  pollDoorLimitSwitches();
   updateHeartbeat();
+  pollDoorLimitSwitches();
   updateUptime();
-  delay(5);
+  pollDoorLimitSwitches();
 }
 
 
@@ -65,13 +84,13 @@ void loop() {
  * Updates counters and state for a visible heartbeat.
  */
 void updateHeartbeat() {
-  heartbeatCounter++;
-  if (heartbeatCounter >= HEARTBEAT_COUNTER_RESET) {
-    heartbeatCounter = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastHeartbeat > HEARTBEAT_MILLIS) {
+    lastHeartbeat = currentMillis;
     noInterrupts();
     digitalWrite(HEARTBEAT_PIN, !digitalRead(HEARTBEAT_PIN));
     interrupts();
-  }  
+  }
 }
 
 
@@ -93,55 +112,95 @@ void updateUptime() {
 
 
 /**
- * Poll the buttons for manually opening and closing the door.  Since these are not interrupt driven, the button
- * will need to be held down at least one polling cycle.
+ * Polls the buttons from the pendant.  Buttons will need to be pressed for at least
+ * BUTTON_DEBOUNCE * BUTTON_POLL_INTERVAL microseconds (longer if bouncing) to be
+ * registered as pressed.
  */
-void pollDoorButtons() {
-  noInterrupts();
+void pollButtons() {
+  unsigned long currentTime = micros();
+  if (currentTime - buttonPollTime < BUTTON_POLL_INTERVAL) {
+    return;
+  }
+  buttonPollTime = currentTime;
 
-  if (digitalRead(OPEN_BUTTON_PIN) == LOW) {
+  if (isSwitchClosed(DOOR_OPEN_BUTTON_PIN, &doorOpenButtonDebounceCounter, BUTTON_DEBOUNCE)) {
     requestDoorCommand(DOOR_COMMAND_OPEN);
   }
-  else if (digitalRead(CLOSE_BUTTON_PIN) == LOW) {
+  if (isSwitchClosed(DOOR_CLOSE_BUTTON_PIN, &doorCloseButtonDebounceCounter, BUTTON_DEBOUNCE)) {
     requestDoorCommand(DOOR_COMMAND_CLOSE);
   }
-
-  interrupts();  
-}
-
-
-/**
- * Poll the buttons for manually turning the light on and off.  Since these are not interrupt driven, the button
- * will need to be held down at least one polling cycle.
- */
-void pollLightButtons() {
-  noInterrupts();
-
-  if (digitalRead(LIGHT_ON_BUTTON_PIN) == LOW) {
+  
+  if (isSwitchClosed(LIGHT_ON_BUTTON_PIN, &lightOnButtonDebounceCounter, BUTTON_DEBOUNCE)) {
     requestLightCommand(LIGHT_COMMAND_ON);
   }
-  else if (digitalRead(LIGHT_OFF_BUTTON_PIN) == LOW) {
+  if (isSwitchClosed(LIGHT_OFF_BUTTON_PIN, &lightOffButtonDebounceCounter, BUTTON_DEBOUNCE)) {
     requestLightCommand(LIGHT_COMMAND_OFF);
   }
-
-  interrupts();  
 }
 
 
 /**
- * Processes and I2C write request.
+ * Checks if an active-low switch is closed. Performs debounsing on the signal.
+ * Should be called based on time rather than every loop cycle.
+ */
+boolean isSwitchClosed(byte pin, byte *debounceCounter, byte debounceCounterLimit) {
+  if (!digitalRead(pin)) {
+    if (*debounceCounter < debounceCounterLimit) {
+      ++(*debounceCounter);
+    }
+    else {
+      return true;
+    }
+  }
+  else {
+    debounceCounter = 0;
+  }
+  return false;
+}
+
+
+/**
+ * Processes an I2C write request.
  * 
  * Data structure for write:
- * Byte 0: Top 4 bits: command type 0x1 for door, 0x2 for light
- * Byte 0: Bottom 4 bits: command appropriate for type (DOOR_COMMAND_* or LIGHT_COMMAND_*
+ * Byte 0: command type 0x1 for door, 0x2 for light, 0x03 for pan servo, 0x04 for tilt servo
+ * Byte 1: data appropriate for type (DOOR_COMMAND_* or LIGHT_COMMAND_* or servo angle)
  */
 void processI2cWrite(int bytes) {
-  int data = Wire.read();
-  if ((data & I2C_COMMAND_DOOR_MASK) != 0) {
-    requestDoorCommand(data & I2C_COMMAND_MASK);
+  byte command = Wire.read();
+  switch (command) {
+    case I2C_COMMAND_DOOR:
+      if (Wire.available() > 0) {
+        requestDoorCommand(Wire.read());
+      }
+      break;
+
+    case I2C_COMMAND_LIGHT:
+      if (Wire.available() > 0) {
+        requestLightCommand(Wire.read());
+      }
+      break;
+
+    case I2C_COMMAND_PAN:
+      if (Wire.available() > 0) {
+        requestPanAngle(Wire.read());
+      }
+      break;
+
+    case I2C_COMMAND_TILT:
+      if (Wire.available() > 0) {
+        requestTiltAngle(Wire.read());
+      }
+      break;
+
+    default:
+      // Unknown command - do nothing
+      break;
   }
-  else if ((data & I2C_COMMAND_LIGHT_MASK) != 0) {
-    requestLightCommand(data & I2C_COMMAND_MASK);
+
+  // Clear out any remaiing bytes
+  while (Wire.read() > 0) {
+    Wire.read();
   }
 }
 
@@ -150,13 +209,15 @@ void processI2cWrite(int bytes) {
  * Processes an I2C read request.
  * 
  * Data structure for read:
- * Byte 0: Version: 0x01
+ * Byte 0: Version: 0x02
  * Byte 1: Top 4 bits: door state, Bottom 4 bits: light state
- * Bytes 2-6: approximate uptime in millis (big endian), note: overflows approximately every 35 years
+ * Bytes 2-6: approximate uptime in millis (big endian), note: overflows approximately every 35 years (unsigned)
+ * Byte 7: current Pan angle (unsigned)
+ * Byte 8: current Tilt angle (unsigned)
  */
 void processI2cRead() {
-  byte data[7];
-  data[0] = 0x01;
+  byte data[9];
+  data[0] = 0x02;
   data[1] = (getDoorState() << 4) | getLightState();
 
   unsigned long currentUptime = millis();
@@ -166,6 +227,9 @@ void processI2cRead() {
   data[5] = (currentUptime >>  8) & 0xFF;
   data[6] = (currentUptime      ) & 0xFF;
 
-  Wire.write(data, 7);
+  data[7] = getCurrentPanAngle();
+  data[8] = getCurrentTiltAngle();
+
+  Wire.write(data, 9);
 }
 
